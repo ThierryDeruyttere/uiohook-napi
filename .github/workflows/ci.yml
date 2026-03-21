@@ -11,10 +11,10 @@ jobs:
         submodules: true
     - uses: actions/setup-node@v6
     - run: npm install --global node-gyp
-    - run: yarn apply-libuiohook-patch
-    - run: yarn --frozen-lockfile
-    - run: yarn prebuild --arch x64
-    - run: yarn prebuild --arch arm64
+    - run: npm run apply-libuiohook-patch
+    - run: npm ci
+    - run: npm run prebuild "--" --arch x64
+    - run: npm run prebuild "--" --arch arm64
     - uses: actions/upload-artifact@v6
       with:
         name: windows
@@ -30,11 +30,11 @@ jobs:
     - run: |
         sudo apt-get update
         sudo apt-get install -y libxrandr-dev libxtst-dev
-    - run: yarn apply-libuiohook-patch
-    - run: yarn --frozen-lockfile
-    - run: yarn prebuild --arch x64
-    - run: yarn prebuild --arch arm64
-    - run: yarn prebuild --arch loong64
+    - run: npm run apply-libuiohook-patch
+    - run: npm ci
+    - run: npm run prebuild -- --arch x64
+    - run: npm run prebuild -- --arch arm64
+    - run: npm run prebuild -- --arch loong64
     - uses: actions/upload-artifact@v6
       with:
         name: linux
@@ -47,10 +47,10 @@ jobs:
       with:
         submodules: true
     - uses: actions/setup-node@v6
-    - run: yarn apply-libuiohook-patch
-    - run: yarn --frozen-lockfile
-    - run: yarn prebuild --arch x64
-    - run: yarn prebuild --arch arm64
+    - run: npm run apply-libuiohook-patch
+    - run: npm ci
+    - run: npm run prebuild -- --arch x64
+    - run: npm run prebuild -- --arch arm64
     - uses: actions/upload-artifact@v6
       with:
         name: darwin
@@ -79,9 +79,9 @@ jobs:
         name: darwin
         path: prebuilds
     - uses: actions/setup-node@v6
-    - run: yarn apply-libuiohook-patch
-    - run: yarn --frozen-lockfile --ignore-scripts
-    - run: yarn tsc
+    - run: npm run apply-libuiohook-patch
+    - run: npm ci --ignore-scripts
+    - run: npx tsc
     - run: npm pack
     - uses: actions/upload-artifact@v6
       with:
