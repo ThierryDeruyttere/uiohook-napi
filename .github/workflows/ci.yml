@@ -29,7 +29,7 @@ jobs:
     - uses: actions/setup-node@v6
     - run: |
         sudo apt-get update
-        sudo apt-get install -y libxrandr-dev libxtst-dev
+        sudo apt-get install -y libx11-dev libxrandr-dev libxtst-dev libxt-dev libxcb-xkb-dev libxkbcommon-x11-dev libxkbcommon-dev
     - run: npm run apply-libuiohook-patch
     - run: npm ci
     - run: npm run prebuild -- --arch x64
