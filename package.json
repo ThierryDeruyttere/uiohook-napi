@@ -1,12 +1,13 @@
 {
   "name": "uiohook-napi",
-  "version": "1.5.5",
+  "version": "1.6.0",
+  "description": "Fork of uiohook-napi that exposes keychar (OS-resolved Unicode character) on keyboard events",
   "author": {
-    "name": "Alexander Drozdov"
+    "name": "Thierry Deruyttere"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/SnosMe/uiohook-napi.git"
+    "url": "https://github.com/ThierryDeruyttere/uiohook-napi.git"
   },
   "license": "MIT",
   "keywords": [

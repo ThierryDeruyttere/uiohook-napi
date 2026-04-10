@@ -32,6 +32,7 @@ export interface UiohookKeyboardEvent {
   metaKey: boolean
   shiftKey: boolean
   keycode: number
+  keychar: number
 }
 
 export interface UiohookMouseEvent {
