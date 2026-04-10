@@ -352,35 +352,14 @@ void hook_event_proc(XPointer closeure, XRecordInterceptData *recorded_data) {
 
             event.data.keyboard.keycode = scancode;
             event.data.keyboard.rawcode = keysym;
-            event.data.keyboard.keychar = CHAR_UNDEFINED;
+            event.data.keyboard.keychar = (count > 0) ? buffer[0] : CHAR_UNDEFINED;
 
-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X pressed. (%#X)\n",
-                    __FUNCTION__, __LINE__, event.data.keyboard.keycode, event.data.keyboard.rawcode);
+            logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X pressed. (%#X) keychar: %#X\n",
+                    __FUNCTION__, __LINE__, event.data.keyboard.keycode, event.data.keyboard.rawcode,
+                    event.data.keyboard.keychar);
 
             // Fire key pressed event.
             dispatch_event(&event);
-
-            // If the pressed event was not consumed...
-            if (event.reserved ^ 0x01) {
-                for (unsigned int i = 0; i < count; i++) {
-                    // Populate key typed event.
-                    event.time = timestamp;
-                    event.reserved = 0x00;
-
-                    event.type = EVENT_KEY_TYPED;
-                    event.mask = get_modifiers();
-
-                    event.data.keyboard.keycode = VC_UNDEFINED;
-                    event.data.keyboard.rawcode = keysym;
-                    event.data.keyboard.keychar = buffer[i];
-
-                    logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X typed. (%lc)\n",
-                            __FUNCTION__, __LINE__, event.data.keyboard.keycode, (uint16_t) event.data.keyboard.keychar);
-
-                    // Fire key typed event.
-                    dispatch_event(&event);
-                }
-            }
         } else if (data->type == KeyRelease) {
             // The X11 KeyCode associated with this event.
             KeyCode keycode = (KeyCode) data->event.u.u.detail;

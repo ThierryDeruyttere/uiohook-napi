@@ -251,6 +251,46 @@ static void hook_status_proc(CFRunLoopObserverRef observer, CFRunLoopActivity ac
 static inline void process_key_pressed(uint64_t timestamp, CGEventRef event_ref) {
     UInt64 keycode = CGEventGetIntegerValueField(event_ref, kCGKeyboardEventKeycode);
 
+    // Resolve the Unicode character for this key BEFORE dispatching the
+    // pressed event, so that consumers get the real OS keychar immediately
+    // instead of CHAR_UNDEFINED.
+    tis_keycode_message->event = event_ref;
+    tis_keycode_message->length = 0;
+    bool is_runloop_main = CFEqual(event_loop, CFRunLoopGetMain());
+
+    if (dispatch_sync_f_f != NULL && dispatch_main_queue_s != NULL && !is_runloop_main) {
+        (*dispatch_sync_f_f)(dispatch_main_queue_s, tis_keycode_message, &keycode_to_lookup);
+    }
+    #if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
+    else if (!is_runloop_main) {
+        pthread_mutex_lock(&main_runloop_mutex);
+
+        CFStringRef mode = CFRunLoopCopyCurrentMode(CFRunLoopGetMain());
+        if (mode != NULL) {
+            CFRelease(mode);
+            CFRunLoopSourceSignal(main_runloop_keycode->source);
+            CFRunLoopWakeUp(CFRunLoopGetMain());
+            pthread_cond_wait(&main_runloop_cond, &main_runloop_mutex);
+        }
+        else {
+            logger(LOG_LEVEL_WARN, "%s [%u]: Failed to signal RunLoop main!\n",
+                    __FUNCTION__, __LINE__);
+        }
+
+        pthread_mutex_unlock(&main_runloop_mutex);
+    }
+    #endif
+    else {
+        keycode_to_lookup(tis_keycode_message);
+    }
+
+    // Use the first resolved character (if any) as the keychar on the
+    // pressed event. This is the real OS-level Unicode character.
+    uint16_t resolved_keychar = CHAR_UNDEFINED;
+    if (tis_keycode_message->length > 0) {
+        resolved_keychar = tis_keycode_message->buffer[0];
+    }
+
     // Populate key pressed event.
     event.time = timestamp;
     event.reserved = 0x00;
@@ -260,92 +300,14 @@ static inline void process_key_pressed(uint64_t timestamp, CGEventRef event_ref)
 
     event.data.keyboard.keycode = keycode_to_scancode(keycode);
     event.data.keyboard.rawcode = keycode;
-    event.data.keyboard.keychar = CHAR_UNDEFINED;
+    event.data.keyboard.keychar = resolved_keychar;
 
-    logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X pressed. (%#X)\n",
-            __FUNCTION__, __LINE__, event.data.keyboard.keycode, event.data.keyboard.rawcode);
+    logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X pressed. (%#X) keychar: %#X\n",
+            __FUNCTION__, __LINE__, event.data.keyboard.keycode, event.data.keyboard.rawcode,
+            event.data.keyboard.keychar);
 
     // Fire key pressed event.
     dispatch_event(&event);
-
-    // If the pressed event was not consumed...
-    if (event.reserved ^ 0x01) {
-        tis_keycode_message->event = event_ref;
-        tis_keycode_message->length = 0;
-        bool is_runloop_main = CFEqual(event_loop, CFRunLoopGetMain());
-
-        if (dispatch_sync_f_f != NULL && dispatch_main_queue_s != NULL && !is_runloop_main) {
-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Using dispatch_sync_f for key typed events.\n",
-                    __FUNCTION__, __LINE__);
-            (*dispatch_sync_f_f)(dispatch_main_queue_s, tis_keycode_message, &keycode_to_lookup);
-        }
-        #if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
-        else if (!is_runloop_main) {
-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Using CFRunLoopWakeUp for key typed events.\n",
-                    __FUNCTION__, __LINE__);
-
-            // Lock for code dealing with the main runloop.
-            pthread_mutex_lock(&main_runloop_mutex);
-
-            // Check to see if the main runloop is still running.
-            // TODO I would rather this be a check on hook_enable(),
-            // but it makes the usage complicated by requiring a separate
-            // thread for the main runloop and hook registration.
-            CFStringRef mode = CFRunLoopCopyCurrentMode(CFRunLoopGetMain());
-            if (mode != NULL) {
-                CFRelease(mode);
-
-                // Lookup the Unicode representation for this event.
-                //CFRunLoopSourceContext context = { .version = 0 };
-                //CFRunLoopSourceGetContext(main_runloop_keycode->source, &context);
-
-                // Get the run loop context info pointer.
-                //TISKeycodeMessage *info = (TISKeycodeMessage *) context.info;
-
-                // Set the event pointer.
-                //info->event = event_ref;
-
-
-                // Signal the custom source and wakeup the main runloop.
-                CFRunLoopSourceSignal(main_runloop_keycode->source);
-                CFRunLoopWakeUp(CFRunLoopGetMain());
-
-                // Wait for a lock while the main runloop processes they key typed event.
-                pthread_cond_wait(&main_runloop_cond, &main_runloop_mutex);
-            }
-            else {
-                logger(LOG_LEVEL_WARN, "%s [%u]: Failed to signal RunLoop main!\n",
-                        __FUNCTION__, __LINE__);
-            }
-
-            // Unlock for code dealing with the main runloop.
-            pthread_mutex_unlock(&main_runloop_mutex);
-        }
-        #endif
-        else {
-            keycode_to_lookup(tis_keycode_message);
-        }
-
-        for (unsigned int i = 0; i < tis_keycode_message->length; i++) {
-            // Populate key typed event.
-            event.time = timestamp;
-            event.reserved = 0x00;
-
-            event.type = EVENT_KEY_TYPED;
-            event.mask = get_modifiers();
-
-            event.data.keyboard.keycode = VC_UNDEFINED;
-            event.data.keyboard.rawcode = keycode;
-            event.data.keyboard.keychar = tis_keycode_message->buffer[i];
-
-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X typed. (%lc)\n",
-                    __FUNCTION__, __LINE__, event.data.keyboard.keycode,
-                    (wint_t) event.data.keyboard.keychar);
-
-            // Populate key typed event.
-            dispatch_event(&event);
-        }
-    }
 }
 
 static inline void process_key_released(uint64_t timestamp, CGEventRef event_ref) {
