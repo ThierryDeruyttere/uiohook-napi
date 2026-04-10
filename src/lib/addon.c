@@ -38,19 +38,19 @@ napi_value uiohook_to_js_event(napi_env env, uiohook_event* event) {
   NAPI_FATAL_IF_FAILED(status, "uiohook_to_js_event", "napi_create_uint32");
 
   napi_value e_altKey;
-  status = napi_get_boolean(env, (event->mask & (MASK_ALT)), &e_altKey);
+  status = napi_get_boolean(env, !!(event->mask & (MASK_ALT)), &e_altKey);
   NAPI_FATAL_IF_FAILED(status, "uiohook_to_js_event", "napi_get_boolean");
 
   napi_value e_ctrlKey;
-  status = napi_get_boolean(env, (event->mask & (MASK_CTRL)), &e_ctrlKey);
+  status = napi_get_boolean(env, !!(event->mask & (MASK_CTRL)), &e_ctrlKey);
   NAPI_FATAL_IF_FAILED(status, "uiohook_to_js_event", "napi_get_boolean");
 
   napi_value e_metaKey;
-  status = napi_get_boolean(env, (event->mask & (MASK_META)), &e_metaKey);
+  status = napi_get_boolean(env, !!(event->mask & (MASK_META)), &e_metaKey);
   NAPI_FATAL_IF_FAILED(status, "uiohook_to_js_event", "napi_get_boolean");
 
   napi_value e_shiftKey;
-  status = napi_get_boolean(env, (event->mask & (MASK_SHIFT)), &e_shiftKey);
+  status = napi_get_boolean(env, !!(event->mask & (MASK_SHIFT)), &e_shiftKey);
   NAPI_FATAL_IF_FAILED(status, "uiohook_to_js_event", "napi_get_boolean");
 
   napi_value e_time;
