@@ -37,7 +37,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxrandr-dev libxtst-dev libxt-dev
+          sudo apt-get install -y libx11-dev libxrandr-dev libxtst-dev libxt-dev libxcb-xkb-dev libxkbcommon-x11-dev libxkbcommon-dev
 
       - run: npm install --ignore-scripts
       - run: npx prebuildify --napi --strip
