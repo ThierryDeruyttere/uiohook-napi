@@ -15,8 +15,9 @@ jobs:
         include:
           - os: macos-14
             platform: darwin-arm64
-          - os: macos-13
+          - os: macos-14
             platform: darwin-x64
+            prebuild_args: --arch x64
           - os: ubuntu-22.04
             platform: linux-x64
           - os: ubuntu-22.04-arm
@@ -40,7 +41,7 @@ jobs:
           sudo apt-get install -y libx11-dev libxrandr-dev libxtst-dev libxt-dev libxcb-xkb-dev libxkbcommon-x11-dev libxkbcommon-dev
 
       - run: npm install --ignore-scripts
-      - run: npx prebuildify --napi --strip
+      - run: npx prebuildify --napi --strip ${{ matrix.prebuild_args }}
 
       - uses: actions/upload-artifact@v4
         with:
