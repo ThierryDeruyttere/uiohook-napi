@@ -2,6 +2,19 @@ name: Prebuild
 
 on: push
 
+# Each arch is built on a runner that can GENUINELY produce it. node-gyp's
+# --arch flag does NOT cross-compile C code: without a cross-toolchain it
+# compiles for the host and just LABELS the output with the requested arch
+# (observed: a "linux-arm64"/"linux-loong64" .node that `file` showed as
+# x86-64). The two legitimate cross-builds are kept: MSVC on windows-2022
+# ships an ARM64 cross-compiler, and Xcode clang targets x86_64 from arm64
+# macs. Linux gets one native runner per arch; loong64 was dropped — no
+# toolchain, so it never produced a real LoongArch binary.
+#
+# Each job uploads ONLY the prebuild dirs it built (not the whole prebuilds/
+# folder), so stale binaries committed in the repo can't ride along into the
+# artifacts and get re-committed as if freshly built.
+
 jobs:
   prebuild-windows:
     runs-on: windows-2022
@@ -15,9 +28,11 @@ jobs:
     - uses: actions/upload-artifact@v6
       with:
         name: windows
-        path: prebuilds
+        path: |
+          prebuilds/win32-x64
+          prebuilds/win32-arm64
 
-  prebuild-linux:
+  prebuild-linux-x64:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v6
@@ -27,12 +42,25 @@ jobs:
         sudo apt-get install -y libxrandr-dev libxtst-dev
     - run: npm ci
     - run: npm run prebuild -- --arch x64
-    - run: npm run prebuild -- --arch arm64
-    - run: npm run prebuild -- --arch loong64
     - uses: actions/upload-artifact@v6
       with:
-        name: linux
-        path: prebuilds
+        name: linux-x64
+        path: prebuilds/linux-x64
+
+  prebuild-linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-node@v6
+    - run: |
+        sudo apt-get update
+        sudo apt-get install -y libxrandr-dev libxtst-dev
+    - run: npm ci
+    - run: npm run prebuild -- --arch arm64
+    - uses: actions/upload-artifact@v6
+      with:
+        name: linux-arm64
+        path: prebuilds/linux-arm64
 
   prebuild-darwin:
     runs-on: macos-14
@@ -45,12 +73,15 @@ jobs:
     - uses: actions/upload-artifact@v6
       with:
         name: darwin
-        path: prebuilds
+        path: |
+          prebuilds/darwin-x64
+          prebuilds/darwin-arm64
 
   build-package:
     needs:
     - prebuild-windows
-    - prebuild-linux
+    - prebuild-linux-x64
+    - prebuild-linux-arm64
     - prebuild-darwin
     runs-on: ubuntu-latest
     steps:
@@ -61,8 +92,12 @@ jobs:
         path: prebuilds
     - uses: actions/download-artifact@v6
       with:
-        name: linux
-        path: prebuilds
+        name: linux-x64
+        path: prebuilds/linux-x64
+    - uses: actions/download-artifact@v6
+      with:
+        name: linux-arm64
+        path: prebuilds/linux-arm64
     - uses: actions/download-artifact@v6
       with:
         name: darwin

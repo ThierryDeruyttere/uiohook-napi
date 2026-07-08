@@ -24,6 +24,9 @@ jobs:
             platform: linux-arm64
           - os: windows-2022
             platform: win32-x64
+          - os: windows-2022
+            platform: win32-arm64
+            prebuild_args: --arch arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
