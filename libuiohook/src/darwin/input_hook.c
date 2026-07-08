@@ -26,6 +26,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <sys/time.h>
 #include <uiohook.h>
 
@@ -860,9 +861,25 @@ static inline void process_mouse_wheel(uint64_t timestamp, CGEventRef event_ref)
     }
 }
 
+// Convert a mach_absolute_time delta to milliseconds (timebase cached).
+static double mach_delta_ms(uint64_t start, uint64_t end) {
+    static mach_timebase_info_data_t tb = { 0, 0 };
+    if (tb.denom == 0) {
+        mach_timebase_info(&tb);
+    }
+    return (double) (end - start) * tb.numer / tb.denom / 1e6;
+}
+
 CGEventRef hook_event_proc(CGEventTapProxy tap_proxy, CGEventType type, CGEventRef event_ref, void *refcon) {
     // Get the local system time in UTC.
     gettimeofday(&system_time, NULL);
+
+    // Instrument callback latency. With an ACTIVE tap, time spent in this
+    // callback delays event delivery to the whole system; past ~1s macOS
+    // disables the tap (kCGEventTapDisabledByTimeout) and events are LOST.
+    // A slow-callback log with the event type turns a bare "CGEventTap
+    // timeout!" into an actionable culprit.
+    uint64_t proc_enter = mach_absolute_time();
 
     // Grab the native event timestamp for use later..
     uint64_t timestamp = (uint64_t) CGEventGetTimestamp(event_ref);
@@ -975,6 +992,12 @@ CGEventRef hook_event_proc(CGEventTapProxy tap_proxy, CGEventType type, CGEventR
                         __FUNCTION__, __LINE__, (unsigned int) type);
             }
             break;
+    }
+
+    double proc_ms = mach_delta_ms(proc_enter, mach_absolute_time());
+    if (proc_ms > 100.0) {
+        logger(LOG_LEVEL_WARN, "%s [%u]: SLOW tap callback: event type %#X took %.0f ms!\n",
+                __FUNCTION__, __LINE__, (unsigned int) type, proc_ms);
     }
 
     CGEventRef result_ref = NULL;
@@ -1148,10 +1171,25 @@ static int create_event_runloop_info(event_runloop_info **hook) {
             CGEventMaskBit(NX_SYSDEFINED);
 
     // Create the event tap.
+    // ACTIVE tap by default: macOS waits for hook_event_proc before delivering
+    // each event, so a stalled callback delays input system-wide and a >~1s
+    // stall gets the tap disabled (events lost). A LISTEN-ONLY tap can never
+    // hold up the user's input — but on 10.15+ passive keyboard taps may
+    // require the separate Input Monitoring permission where active taps ride
+    // on Accessibility, so flipping the default risks silently losing keyboard
+    // events on machines that only granted Accessibility. Opt in via
+    // UIOHOOK_TAP_LISTEN_ONLY=1 to validate on a given setup.
+    CGEventTapOptions tap_options = kCGEventTapOptionDefault;
+    const char *listen_only = getenv("UIOHOOK_TAP_LISTEN_ONLY");
+    if (listen_only != NULL && listen_only[0] == '1') {
+        logger(LOG_LEVEL_WARN, "%s [%u]: Using LISTEN-ONLY event tap (UIOHOOK_TAP_LISTEN_ONLY=1).\n",
+                __FUNCTION__, __LINE__);
+        tap_options = kCGEventTapOptionListenOnly;
+    }
     (*hook)->port = CGEventTapCreate(
             kCGSessionEventTap,       // kCGHIDEventTap
             kCGHeadInsertEventTap,    // kCGTailAppendEventTap
-            kCGEventTapOptionDefault, // kCGEventTapOptionListenOnly See https://github.com/kwhat/jnativehook/issues/22
+            tap_options,              // See https://github.com/kwhat/jnativehook/issues/22
             event_mask,
             hook_event_proc,
             NULL);

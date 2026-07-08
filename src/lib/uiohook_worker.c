@@ -9,6 +9,9 @@
 #include <pthread.h>
 #include <sched.h>
 #endif
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 
 #include "uiohook_worker.h"
 
@@ -89,6 +92,17 @@ void hook_thread_proc(void* arg) {
     logger_proc(LOG_LEVEL_WARN, "%s [%u]: Could not set thread priority %li for thread %#p! (%#lX)\n",
       __FUNCTION__, __LINE__, (long)THREAD_PRIORITY_TIME_CRITICAL,
       this_thread, (unsigned long)GetLastError());
+  }
+  #elif defined(__APPLE__)
+  // On macOS the sched_param path below fails silently for unprivileged
+  // processes; QoS is the mechanism that actually works. This thread services
+  // an ACTIVE CGEventTap — while it runs, macOS withholds every input event
+  // system-wide — so it must be user-interactive: at default QoS a busy host
+  // process (Electron main under load) starves it, the tap times out
+  // (kCGEventTapDisabledByTimeout), clicks feel delayed and events are dropped.
+  if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0) {
+    logger_proc(LOG_LEVEL_WARN, "%s [%u]: Could not set QOS_CLASS_USER_INTERACTIVE for hook thread!\n",
+      __FUNCTION__, __LINE__);
   }
   #else
   // Raise the thread priority
