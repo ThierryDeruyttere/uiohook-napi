@@ -1,3 +1,404 @@
+diff --git a/src/darwin/input_helper.c b/src/darwin/input_helper.c
+index ada5829..d49ada0 100644
+--- a/src/darwin/input_helper.c
++++ b/src/darwin/input_helper.c
+@@ -22,6 +22,7 @@
+ #ifndef USE_WEAK_IMPORT
+ #include <dlfcn.h>
+ #endif
++#include <pthread.h>
+ #include <stdbool.h>
+ #include <uiohook.h>
+ 
+@@ -38,6 +39,59 @@ static UInt32 deadkey_state;
+ static KeyboardLayoutRef prev_keyboard_layout = NULL;
+ #elif defined(USE_APPLICATION_SERVICES)
+ static TISInputSourceRef prev_keyboard_layout = NULL;
++
++// Cached copy of the current keyboard layout's uchr data, owned by this cache.
++// UCKeyTranslate is a pure function over these bytes, so with a cached copy the
++// HOOK thread translates keycodes itself, without any main-thread help. Before
++// this cache, every keydown dispatch_sync'd to the host app's main queue just
++// to fetch the layout (the TIS calls are not main-thread-safe) — in an Electron
++// host, a busy main thread held every keystroke hostage (active tap) until
++// kCGEventTapDisabledByTimeout froze typing system-wide. The cache is refreshed
++// ON the main thread (primed at hook start, re-checked via a coalesced
++// dispatch_async per keydown), so a layout switch propagates within a keystroke
++// and the tap callback never blocks. The mutex also serializes deadkey_state,
++// which is read/written by the translating thread and reset on layout change.
++static pthread_mutex_t layout_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
++static CFDataRef cached_layout_data = NULL;
++
++// MUST run on the main runloop: TISCopyCurrentKeyboardLayoutInputSource off the
++// main thread causes sporadic "Exception detected while handling key input" and
++// TSMProcessRawKeyCode failed (-192) errors (the reason the dispatch-to-main
++// machinery existed). Copies the current layout's uchr bytes into the cache.
++void refresh_keyboard_layout_cache() {
++    TISInputSourceRef curr_keyboard_layout = TISCopyCurrentKeyboardLayoutInputSource();
++    if (curr_keyboard_layout != NULL && CFGetTypeID(curr_keyboard_layout) == TISInputSourceGetTypeID()) {
++        CFDataRef data = (CFDataRef) TISGetInputSourceProperty(curr_keyboard_layout, kTISPropertyUnicodeKeyLayoutData);
++        if (data != NULL && CFGetTypeID(data) == CFDataGetTypeID() && CFDataGetLength(data) > 0) {
++            pthread_mutex_lock(&layout_cache_mutex);
++            if (cached_layout_data == NULL || CFEqual(data, cached_layout_data) == false) {
++                if (cached_layout_data != NULL) {
++                    CFRelease(cached_layout_data);
++                    // The layout changed: any pending dead-key sequence belongs
++                    // to the old layout.
++                    deadkey_state = 0x00;
++                }
++                cached_layout_data = CFDataCreateCopy(kCFAllocatorDefault, data);
++            }
++            pthread_mutex_unlock(&layout_cache_mutex);
++        }
++    }
++
++    // Keep the previous-layout tracking for parity with the historical
++    // main-thread path (also resets dead keys on layout switch).
++    if (prev_keyboard_layout != NULL && curr_keyboard_layout != NULL && CFEqual(curr_keyboard_layout, prev_keyboard_layout) == false) {
++        pthread_mutex_lock(&layout_cache_mutex);
++        deadkey_state = 0x00;
++        pthread_mutex_unlock(&layout_cache_mutex);
++    }
++    if (prev_keyboard_layout != NULL) {
++        CFRelease(prev_keyboard_layout);
++        prev_keyboard_layout = NULL;
++    }
++    if (curr_keyboard_layout != NULL) {
++        prev_keyboard_layout = curr_keyboard_layout;
++    }
++}
+ #endif
+ 
+ bool is_accessibility_enabled() {
+@@ -114,34 +168,29 @@ UniCharCount keycode_to_unicode(CGEventRef event_ref, UniChar *buffer, UniCharCo
+     #elif defined(USE_APPLICATION_SERVICES)
+     // TODO Try https://developer.apple.com/documentation/coregraphics/1456120-cgeventkeyboardgetunicodestring?language=objc
+     if (CFEqual(CFRunLoopGetCurrent(), CFRunLoopGetMain())) {
+-        // NOTE The following block must execute on the main runloop,
+-        // Ex: CFEqual(CFRunLoopGetCurrent(), CFRunLoopGetMain()) to avoid 
+-        // Exception detected while handling key input and TSMProcessRawKeyCode failed 
+-        // (-192) errors.
+-        TISInputSourceRef curr_keyboard_layout = TISCopyCurrentKeyboardLayoutInputSource();
+-        if (curr_keyboard_layout != NULL && CFGetTypeID(curr_keyboard_layout) == TISInputSourceGetTypeID()) {
+-            CFDataRef data = (CFDataRef) TISGetInputSourceProperty(curr_keyboard_layout, kTISPropertyUnicodeKeyLayoutData);
++        // On the main runloop the TIS calls are safe: refresh the cache
++        // directly (historical single-threaded behavior).
++        refresh_keyboard_layout_cache();
++    }
++
++    pthread_mutex_lock(&layout_cache_mutex);
++    if (cached_layout_data == NULL && !CFEqual(CFRunLoopGetCurrent(), CFRunLoopGetMain())) {
++        // Cache not primed and no main-thread refresh has landed yet (e.g. a
++        // host with no serviced main queue, or the very first keystroke racing
++        // the prime). Last resort: read TIS directly off-main, once — upstream
++        // libuiohook did this for years; it is sporadically unsafe in theory
++        // but strictly better than dropping the keychar. The result is cached,
++        // so this path runs at most once.
++        TISInputSourceRef fallback_layout = TISCopyCurrentKeyboardLayoutInputSource();
++        if (fallback_layout != NULL && CFGetTypeID(fallback_layout) == TISInputSourceGetTypeID()) {
++            CFDataRef data = (CFDataRef) TISGetInputSourceProperty(fallback_layout, kTISPropertyUnicodeKeyLayoutData);
+             if (data != NULL && CFGetTypeID(data) == CFDataGetTypeID() && CFDataGetLength(data) > 0) {
+-                inputData = (CFDataRef) data;
++                cached_layout_data = CFDataCreateCopy(kCFAllocatorDefault, data);
+             }
+-        }
+-        
+-        // Check if the keyboard layout has changed to see if the dead key state needs to be discarded.
+-        if (prev_keyboard_layout != NULL && curr_keyboard_layout != NULL && CFEqual(curr_keyboard_layout, prev_keyboard_layout) == false) {
+-            deadkey_state = 0x00;
+-        }
+-
+-        // Release the previous keyboard layout.
+-        if (prev_keyboard_layout != NULL) {
+-            CFRelease(prev_keyboard_layout);
+-            prev_keyboard_layout = NULL;
+-        }
+-
+-        // Set the previous keyboard layout to the current layout.
+-        if (curr_keyboard_layout != NULL) {
+-            prev_keyboard_layout = curr_keyboard_layout;
++            CFRelease(fallback_layout);
+         }
+     }
++    inputData = cached_layout_data; // borrowed under the mutex for translation
+     #endif
+ 
+     #if defined(USE_CARBON_LEGACY) || defined(USE_APPLICATION_SERVICES)
+@@ -203,6 +252,11 @@ UniCharCount keycode_to_unicode(CGEventRef event_ref, UniChar *buffer, UniCharCo
+             }
+         }
+     }
++    #if defined(USE_APPLICATION_SERVICES)
++    // Held since the cache read: keeps the borrowed layout bytes alive through
++    // UCKeyTranslate and serializes deadkey_state with layout-change resets.
++    pthread_mutex_unlock(&layout_cache_mutex);
++    #endif
+     #else
+     CGEventKeyboardGetUnicodeString(event_ref, size, &count, buffer);
+     #endif
+@@ -532,4 +586,12 @@ void unload_input_helper() {
+         prev_keyboard_layout = NULL;
+     }
+     #endif
++    #if defined(USE_APPLICATION_SERVICES)
++    pthread_mutex_lock(&layout_cache_mutex);
++    if (cached_layout_data != NULL) {
++        CFRelease(cached_layout_data);
++        cached_layout_data = NULL;
++    }
++    pthread_mutex_unlock(&layout_cache_mutex);
++    #endif
+ }
+diff --git a/src/darwin/input_helper.h b/src/darwin/input_helper.h
+index ebd4666..8738356 100644
+--- a/src/darwin/input_helper.h
++++ b/src/darwin/input_helper.h
+@@ -177,6 +177,15 @@ extern bool is_accessibility_enabled();
+  */
+ extern UniCharCount keycode_to_unicode(CGEventRef event_ref, UniChar *buffer, UniCharCount size);
+ 
++#if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
++/* Refreshes the cached keyboard layout data used by keycode_to_unicode.
++ * MUST be called on the main runloop (the TIS calls are not thread-safe off
++ * main). The hook thread translates from the cache so the event tap callback
++ * never blocks on the host app's main queue.
++ */
++extern void refresh_keyboard_layout_cache();
++#endif
++
+ /* Converts an OSX keycode to the appropriate UIOHook scancode constant.
+  */
+ extern uint16_t keycode_to_scancode(UInt64 keycode);
+diff --git a/src/darwin/input_hook.c b/src/darwin/input_hook.c
+index e6cd6ce..598073f 100644
+--- a/src/darwin/input_hook.c
++++ b/src/darwin/input_hook.c
+@@ -71,6 +71,7 @@ typedef void* dispatch_queue_t;
+ #endif
+ static struct dispatch_queue_s *dispatch_main_queue_s;
+ static void (*dispatch_sync_f_f)(dispatch_queue_t, void *, void (*function)(void *));
++static void (*dispatch_async_f_f)(dispatch_queue_t, void *, void (*function)(void *));
+ 
+ #if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
+ typedef struct _main_runloop_info {
+@@ -82,6 +83,27 @@ main_runloop_info *main_runloop_keycode = NULL;
+ 
+ static pthread_cond_t main_runloop_cond = PTHREAD_COND_INITIALIZER;
+ static pthread_mutex_t main_runloop_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++// Coalesced, non-blocking keyboard-layout cache refresh. The hook thread
++// translates keycodes from a cached layout (see input_helper.c); this hops to
++// the main queue — where the TIS calls are safe — to keep that cache fresh,
++// with at most one hop in flight. dispatch_ASYNC on purpose: the old
++// dispatch_SYNC per keydown meant a busy host main thread (Electron under
++// load) stalled the active event tap past kCGEventTapDisabledByTimeout and
++// froze typing system-wide.
++static volatile int32_t layout_refresh_inflight = 0;
++
++static void layout_refresh_proc(void *info) {
++    refresh_keyboard_layout_cache();
++    __sync_lock_release(&layout_refresh_inflight);
++}
++
++static void request_layout_refresh_async() {
++    if (dispatch_async_f_f == NULL || dispatch_main_queue_s == NULL) return;
++    if (__sync_lock_test_and_set(&layout_refresh_inflight, 1) == 0) {
++        (*dispatch_async_f_f)(dispatch_main_queue_s, NULL, &layout_refresh_proc);
++    }
++}
+ #endif
+ 
+ // Click count globals.
+@@ -251,6 +273,36 @@ static void hook_status_proc(CFRunLoopObserverRef observer, CFRunLoopActivity ac
+ static inline void process_key_pressed(uint64_t timestamp, CGEventRef event_ref) {
+     UInt64 keycode = CGEventGetIntegerValueField(event_ref, kCGKeyboardEventKeycode);
+ 
++    // Resolve the Unicode character for this key BEFORE dispatching the
++    // pressed event, so that consumers get the real OS keychar immediately
++    // instead of CHAR_UNDEFINED.
++    tis_keycode_message->event = event_ref;
++    tis_keycode_message->length = 0;
++    bool is_runloop_main = CFEqual(event_loop, CFRunLoopGetMain());
++
++    // Translate on THIS thread from the cached keyboard layout (UCKeyTranslate
++    // is a pure function over the cached bytes — see input_helper.c). The
++    // previous dispatch_sync to the host's main queue held EVERY keystroke
++    // hostage to the host app's main-loop responsiveness: with an active tap,
++    // an Electron main thread busy for >~1s meant kCGEventTapDisabledByTimeout
++    // — typing frozen system-wide until the tap was re-enabled.
++    keycode_to_lookup(tis_keycode_message);
++
++    #if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
++    // Keep the layout cache fresh without blocking: at most one main-queue hop
++    // in flight; a keyboard-layout switch propagates within a keystroke.
++    if (!is_runloop_main) {
++        request_layout_refresh_async();
++    }
++    #endif
++
++    // Use the first resolved character (if any) as the keychar on the
++    // pressed event. This is the real OS-level Unicode character.
++    uint16_t resolved_keychar = CHAR_UNDEFINED;
++    if (tis_keycode_message->length > 0) {
++        resolved_keychar = tis_keycode_message->buffer[0];
++    }
++
+     // Populate key pressed event.
+     event.time = timestamp;
+     event.reserved = 0x00;
+@@ -260,92 +312,14 @@ static inline void process_key_pressed(uint64_t timestamp, CGEventRef event_ref)
+ 
+     event.data.keyboard.keycode = keycode_to_scancode(keycode);
+     event.data.keyboard.rawcode = keycode;
+-    event.data.keyboard.keychar = CHAR_UNDEFINED;
++    event.data.keyboard.keychar = resolved_keychar;
+ 
+-    logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X pressed. (%#X)\n",
+-            __FUNCTION__, __LINE__, event.data.keyboard.keycode, event.data.keyboard.rawcode);
++    logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X pressed. (%#X) keychar: %#X\n",
++            __FUNCTION__, __LINE__, event.data.keyboard.keycode, event.data.keyboard.rawcode,
++            event.data.keyboard.keychar);
+ 
+     // Fire key pressed event.
+     dispatch_event(&event);
+-
+-    // If the pressed event was not consumed...
+-    if (event.reserved ^ 0x01) {
+-        tis_keycode_message->event = event_ref;
+-        tis_keycode_message->length = 0;
+-        bool is_runloop_main = CFEqual(event_loop, CFRunLoopGetMain());
+-
+-        if (dispatch_sync_f_f != NULL && dispatch_main_queue_s != NULL && !is_runloop_main) {
+-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Using dispatch_sync_f for key typed events.\n",
+-                    __FUNCTION__, __LINE__);
+-            (*dispatch_sync_f_f)(dispatch_main_queue_s, tis_keycode_message, &keycode_to_lookup);
+-        }
+-        #if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
+-        else if (!is_runloop_main) {
+-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Using CFRunLoopWakeUp for key typed events.\n",
+-                    __FUNCTION__, __LINE__);
+-
+-            // Lock for code dealing with the main runloop.
+-            pthread_mutex_lock(&main_runloop_mutex);
+-
+-            // Check to see if the main runloop is still running.
+-            // TODO I would rather this be a check on hook_enable(),
+-            // but it makes the usage complicated by requiring a separate
+-            // thread for the main runloop and hook registration.
+-            CFStringRef mode = CFRunLoopCopyCurrentMode(CFRunLoopGetMain());
+-            if (mode != NULL) {
+-                CFRelease(mode);
+-
+-                // Lookup the Unicode representation for this event.
+-                //CFRunLoopSourceContext context = { .version = 0 };
+-                //CFRunLoopSourceGetContext(main_runloop_keycode->source, &context);
+-
+-                // Get the run loop context info pointer.
+-                //TISKeycodeMessage *info = (TISKeycodeMessage *) context.info;
+-
+-                // Set the event pointer.
+-                //info->event = event_ref;
+-
+-
+-                // Signal the custom source and wakeup the main runloop.
+-                CFRunLoopSourceSignal(main_runloop_keycode->source);
+-                CFRunLoopWakeUp(CFRunLoopGetMain());
+-
+-                // Wait for a lock while the main runloop processes they key typed event.
+-                pthread_cond_wait(&main_runloop_cond, &main_runloop_mutex);
+-            }
+-            else {
+-                logger(LOG_LEVEL_WARN, "%s [%u]: Failed to signal RunLoop main!\n",
+-                        __FUNCTION__, __LINE__);
+-            }
+-
+-            // Unlock for code dealing with the main runloop.
+-            pthread_mutex_unlock(&main_runloop_mutex);
+-        }
+-        #endif
+-        else {
+-            keycode_to_lookup(tis_keycode_message);
+-        }
+-
+-        for (unsigned int i = 0; i < tis_keycode_message->length; i++) {
+-            // Populate key typed event.
+-            event.time = timestamp;
+-            event.reserved = 0x00;
+-
+-            event.type = EVENT_KEY_TYPED;
+-            event.mask = get_modifiers();
+-
+-            event.data.keyboard.keycode = VC_UNDEFINED;
+-            event.data.keyboard.rawcode = keycode;
+-            event.data.keyboard.keychar = tis_keycode_message->buffer[i];
+-
+-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Key %#X typed. (%lc)\n",
+-                    __FUNCTION__, __LINE__, event.data.keyboard.keycode,
+-                    (wint_t) event.data.keyboard.keychar);
+-
+-            // Populate key typed event.
+-            dispatch_event(&event);
+-        }
+-    }
+ }
+ 
+ static inline void process_key_released(uint64_t timestamp, CGEventRef event_ref) {
+@@ -509,14 +483,15 @@ static inline void process_system_key(uint64_t timestamp, CGEventRef event_ref)
+         tis_event_message->subtype = 0;
+         tis_event_message->data1 = 0;
+ 
+-        if (dispatch_sync_f_f != NULL && dispatch_main_queue_s != NULL && !is_runloop_main) {
+-            logger(LOG_LEVEL_DEBUG, "%s [%u]: Using dispatch_sync_f for system key events.\n",
+-                    __FUNCTION__, __LINE__);
+-
+-            (*dispatch_sync_f_f)(dispatch_main_queue_s, tis_event_message, &obcj_message);
+-            subtype = tis_event_message->subtype;
+-            data1 = tis_event_message->data1;
+-        } else if (is_runloop_main) {
++        // Only convert via NSEvent when we already ARE the main runloop. The
++        // previous preference for dispatch_sync'ing to main from the hook
++        // thread meant every NX_SYSDEFINED event (media keys, caps lock, and
++        // ambient system-defined events) stalled the active event tap whenever
++        // the host app's main thread was busy — the same
++        // kCGEventTapDisabledByTimeout / frozen-typing failure as the keydown
++        // path. Off-main we use the serialized-CGEvent fallback below, which
++        // reads subtype/data1 without any main-thread help.
++        if (is_runloop_main) {
+             obcj_message(tis_event_message);
+             subtype = tis_event_message->subtype;
+             data1 = tis_event_message->data1;
+@@ -1317,6 +1292,15 @@ UIOHOOK_API int hook_run() {
+                             __FUNCTION__, __LINE__, dlError);
+                 }
+ 
++                // Same dynamic load for dispatch_async_f, used by the coalesced
++                // keyboard-layout cache refresh (never blocks the hook thread).
++                *(void **) (&dispatch_async_f_f) = dlsym(RTLD_DEFAULT, "dispatch_async_f");
++                dlError = dlerror();
++                if (dlError != NULL) {
++                    logger(LOG_LEVEL_DEBUG, "%s [%u]: %s.\n",
++                            __FUNCTION__, __LINE__, dlError);
++                }
++
+                 // This load is equivalent to calling dispatch_get_main_queue().  We use
+                 // _dispatch_main_q because dispatch_get_main_queue is not exported from
+                 // libdispatch.dylib and the upstream function only dereferences the pointer.
+@@ -1327,6 +1311,15 @@ UIOHOOK_API int hook_run() {
+                             __FUNCTION__, __LINE__, dlError);
+                 }
+ 
++                #if !defined(USE_CARBON_LEGACY) && defined(USE_APPLICATION_SERVICES)
++                // Prime the keyboard-layout cache before the first keystroke:
++                // one async hop to the main queue at hook start (the host's
++                // main thread is responsive at start). If it hasn't landed by
++                // the first keydown, keycode_to_unicode's one-shot off-main
++                // fallback covers it.
++                request_layout_refresh_async();
++                #endif
++
+                 if (dispatch_sync_f_f == NULL || dispatch_main_queue_s == NULL) {
+                     logger(LOG_LEVEL_DEBUG, "%s [%u]: Failed to locate dispatch_sync_f() or dispatch_get_main_queue()!\n",
+                             __FUNCTION__, __LINE__);
 diff --git a/src/windows/input_helper.c b/src/windows/input_helper.c
 index e690021..0d383e0 100644
 --- a/src/windows/input_helper.c
