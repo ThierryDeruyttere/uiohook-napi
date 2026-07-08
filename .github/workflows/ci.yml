@@ -7,11 +7,8 @@ jobs:
     runs-on: windows-2022
     steps:
     - uses: actions/checkout@v6
-      with:
-        submodules: true
     - uses: actions/setup-node@v6
     - run: npm install --global node-gyp
-    - run: npm run apply-libuiohook-patch
     - run: npm ci
     - run: npm run prebuild "--" --arch x64
     - run: npm run prebuild "--" --arch arm64
@@ -24,13 +21,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v6
-      with:
-        submodules: true
     - uses: actions/setup-node@v6
     - run: |
         sudo apt-get update
         sudo apt-get install -y libxrandr-dev libxtst-dev
-    - run: npm run apply-libuiohook-patch
     - run: npm ci
     - run: npm run prebuild -- --arch x64
     - run: npm run prebuild -- --arch arm64
@@ -44,10 +38,7 @@ jobs:
     runs-on: macos-14
     steps:
     - uses: actions/checkout@v6
-      with:
-        submodules: true
     - uses: actions/setup-node@v6
-    - run: npm run apply-libuiohook-patch
     - run: npm ci
     - run: npm run prebuild -- --arch x64
     - run: npm run prebuild -- --arch arm64
@@ -64,8 +55,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
-      with:
-        submodules: true
     - uses: actions/download-artifact@v6
       with:
         name: windows
@@ -79,7 +68,6 @@ jobs:
         name: darwin
         path: prebuilds
     - uses: actions/setup-node@v6
-    - run: npm run apply-libuiohook-patch
     - run: npm ci --ignore-scripts
     - run: npx tsc
     - run: npm pack
